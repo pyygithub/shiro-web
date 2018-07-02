@@ -73,7 +73,7 @@ public class CustomRealm extends AuthorizingRealm{
     }
 
     /**
-     * 模拟数据库查询凭证
+     * 数据库查询凭证
      * @param username
      * @return
      */
@@ -86,11 +86,12 @@ public class CustomRealm extends AuthorizingRealm{
     }
 
     /**
-     * 模拟根据用户名获取数据库中的角色数据
+     * 根据用户名获取数据库中的角色数据
      * @param username
      * @return
      */
     private Set<String> getRolesByUsername(String username) {
+        System.out.println("从数据库中获取用户角色数据");
         List<String> list = userDao.findRolesByUsername(username);
         Set<String> sets = new HashSet<>(list);
         return sets;

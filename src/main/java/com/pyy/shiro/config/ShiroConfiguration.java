@@ -1,10 +1,12 @@
 package com.pyy.shiro.config;
 
+import com.pyy.shiro.cache.RedisCacheManager;
 import com.pyy.shiro.filter.RolesOrFilter;
 import com.pyy.shiro.realm.CustomRealm;
 import com.pyy.shiro.session.CustomSessionManager;
 import com.pyy.shiro.session.RedisSessionDAO;
 import org.apache.shiro.authc.credential.HashedCredentialsMatcher;
+import org.apache.shiro.cache.CacheManager;
 import org.apache.shiro.mgt.SecurityManager;
 import org.apache.shiro.session.mgt.SessionManager;
 import org.apache.shiro.spring.LifecycleBeanPostProcessor;
@@ -102,8 +104,10 @@ public class ShiroConfiguration {
 
         // 设置Realm
         securityManager.setRealm(customRealm);
-
+        // 设置sessionManager
         securityManager.setSessionManager(sessionManager());
+        // 设置CacheManager
+        securityManager.setCacheManager(redisCacheManager());
         return securityManager;
     }
 
@@ -147,5 +151,10 @@ public class ShiroConfiguration {
     public RedisSessionDAO redisSessionDAO(){
         RedisSessionDAO redisSessionDAO = new RedisSessionDAO();
         return redisSessionDAO;
+    }
+
+    @Bean
+    public CacheManager redisCacheManager() {
+        return new RedisCacheManager();
     }
 }

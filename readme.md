@@ -1349,8 +1349,425 @@ public class RolesOrFilter extends AuthorizationFilter {
 ```
 2. Redis配置
 ```
+ ##### redis 配置 ####
+  redis:
+    host: localhost
+    password:
+    port: 6379
+    pool:
+      max-idle: 100
+      min-idle: 1
+      max-active: 1000
+      max-wait: -1
+```
+3.编写RedisUtil工具类方便操作redis缓存
+```
+package com.pyy.shiro.util;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.JedisPool;
+
+import java.util.Set;
+
+/**
+ * Created by Administrator on 2018/7/1 0001.
+ */
+@Component
+public class RedisUtil {
+
+    @Autowired
+    JedisPool jedisPool;
+
+    private Jedis getResource() {
+        return jedisPool.getResource();
+    }
+
+    public void set(byte[] key, byte[] value) {
+        Jedis jedis = getResource();
+        try {
+            jedis.set(key, value);
+        } finally{
+            jedis.close();
+        }
+    }
+
+    public void expire(byte[] key, int time) {
+        Jedis jedis = getResource();
+        try {
+            jedis.expire(key, time);
+        } finally{
+            jedis.close();
+        }
+    }
+
+    public byte[] get(byte[] key) {
+        Jedis jedis = getResource();
+        try {
+            return jedis.get(key);
+        } finally{
+            jedis.close();
+        }
+    }
+
+    public void del(byte[] key) {
+        Jedis jedis = getResource();
+        try {
+            jedis.del(key);
+        } finally{
+            jedis.close();
+        }
+    }
+
+    public Set<byte[]> keys(String shiroShiroPrefix) {
+        Jedis jedis = getResource();
+        try {
+            return jedis.keys((shiroShiroPrefix + "*").getBytes());
+        } finally{
+            jedis.close();
+        }
+    }
+}
+```
+4. RedisConfig配置类编写
+```
+package com.pyy.shiro.config;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.annotation.EnableCaching;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.JedisPoolConfig;
+
+@Configuration
+@EnableCaching
+public class RedisConfig {
+
+    @Value("${spring.redis.host}")
+    private String host;
+
+    @Value("${spring.redis.port}")
+    private int port;
+
+    @Value("${spring.redis.pool.max-idle}")
+    private int maxIdle;
+
+    @Value("${spring.redis.pool.max-wait}")
+    private long maxWaitMillis;
+
+    @Value("${spring.redis.password}")
+    private String password;
+
+    @Bean
+    public JedisPool redisPoolFactory() {
+        JedisPoolConfig jedisPoolConfig = new JedisPoolConfig();
+        jedisPoolConfig.setMaxIdle(maxIdle);
+        jedisPoolConfig.setMaxWaitMillis(maxWaitMillis);
+
+        JedisPool jedisPool = new JedisPool(jedisPoolConfig, host, port);
+
+        return jedisPool;
+    }
+
+}
+```
+5. 自定义SessionDAO，使用redis完成session的存取
+```
+package com.pyy.shiro.session;
+
+import com.pyy.shiro.util.RedisUtil;
+import org.apache.shiro.session.Session;
+import org.apache.shiro.session.UnknownSessionException;
+import org.apache.shiro.session.mgt.eis.AbstractSessionDAO;
+import org.apache.shiro.util.CollectionUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.util.SerializationUtils;
+
+import java.io.Serializable;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Set;
+
+/**
+ * Created by Administrator on 2018/7/1 0001.
+ */
+public class RedisSessionDAO extends AbstractSessionDAO {
+
+    @Autowired
+    private RedisUtil redisUtil;
+
+    private static final String SHIRO_SHIRO_PREFIX = "pyy-session";
+
+    /**
+     * 使用sessionId + 前缀的二进制形式作为key
+     * @param key
+     * @return
+     */
+    private byte[] getKey(String key) {
+        return (SHIRO_SHIRO_PREFIX + key).getBytes();
+    }
+
+    private void saveSession(Session session) {
+        byte[] key = getKey(session.getId().toString());
+        // 序列化为byte数组
+        byte[] value = SerializationUtils.serialize(session);
+
+        redisUtil.set(key, value);
+        redisUtil.expire(key, 600);//10分钟
+    }
+
+    @Override
+    protected Serializable doCreate(Session session) {
+        Serializable sessionId = generateSessionId(session);
+        assignSessionId(session, sessionId);
+        saveSession(session);
+        return sessionId;
+    }
+
+
+
+    @Override
+    protected Session doReadSession(Serializable sessionId) {
+        System.out.println("read session");
+        if(sessionId == null) {
+            return null;
+        }
+        byte[] key = getKey(sessionId.toString());
+        byte[] value = redisUtil.get(key);
+        // 反序列化为sesison对象
+        return (Session) SerializationUtils.deserialize(value);
+    }
+
+    @Override
+    public void update(Session session) throws UnknownSessionException {
+        saveSession(session);
+    }
+
+    @Override
+    public void delete(Session session) {
+        if(session == null || session.getId() == null){
+            return;
+        }
+        byte[] key = getKey(session.getId().toString());
+        redisUtil.del(key);
+    }
+
+    @Override
+    public Collection<Session> getActiveSessions() {
+        Set<byte[]> keys = redisUtil.keys(SHIRO_SHIRO_PREFIX);
+        Set<Session> sessions = new HashSet<>();
+        if(CollectionUtils.isEmpty(keys)) {
+            return sessions;
+        }
+        for(byte[] key : keys) {
+            Session session = (Session) SerializationUtils.deserialize(redisUtil.get(key));
+            sessions.add(session);
+        }
+        return sessions;
+    }
+
+}
+
+```
+6. 自定义SessionManager减少session读取次数
+```
+package com.pyy.shiro.session;
+
+import org.apache.shiro.session.Session;
+import org.apache.shiro.session.UnknownSessionException;
+import org.apache.shiro.session.mgt.SessionKey;
+import org.apache.shiro.web.session.mgt.DefaultWebSessionManager;
+import org.apache.shiro.web.session.mgt.WebSessionKey;
+
+import javax.servlet.ServletRequest;
+import java.io.Serializable;
+
+/**
+ * 自定义sessionManager 用了减少多次访问redis问题
+ * Created by Administrator on 2018/7/1 0001.
+ */
+public class CustomSessionManager extends DefaultWebSessionManager {
+    @Override
+    protected Session retrieveSession(SessionKey sessionKey) throws UnknownSessionException {
+        Serializable sessionId = getSessionId(sessionKey);
+        ServletRequest request = null;
+        if(sessionKey instanceof WebSessionKey) {
+            request = ((WebSessionKey)sessionKey).getServletRequest();
+        }
+        // 先从request中获取session
+        if(request != null && sessionId != null){
+            Session session = (Session) request.getAttribute(sessionId.toString());
+            if(session != null) {
+                return session;
+            }
+        }
+
+        // 如果request中没有获取到，从原始方法（redis）中获取，存入到request中
+        Session session = super.retrieveSession(sessionKey);
+        if(request != null && sessionId != null) {
+            request.setAttribute(sessionId.toString(), session);
+        }
+
+        return session;
+    }
+}
+```
+7. 配置SessionDAO和SessionManager
+```
+@Bean
+    public SessionManager sessionManager(){
+        CustomSessionManager sessionManager = new CustomSessionManager();
+        sessionManager.setSessionDAO(redisSessionDAO());
+
+        return sessionManager;
+    }
+
+    @Bean
+    public RedisSessionDAO redisSessionDAO(){
+        RedisSessionDAO redisSessionDAO = new RedisSessionDAO();
+        return redisSessionDAO;
+    }
 ```
 
+### Shiro缓存管理
+![](https://upload-images.jianshu.io/upload_images/11464886-71c75b8d63d585c2.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240)
+
+使用Redis完成Shiro的cache案例：
+1. 编写RedisCache类
+```
+package com.pyy.shiro.cache;
+
+import com.pyy.shiro.util.RedisUtil;
+import org.apache.shiro.cache.Cache;
+import org.apache.shiro.cache.CacheException;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import org.springframework.util.SerializationUtils;
+
+import java.util.Collection;
+import java.util.Set;
+
+/**
+ * Created by Administrator on 2018/7/2 0002.
+ */
+@Component
+public class RedisCache<K, V> implements Cache<K, V>{
+
+    private final String CACHE_PREFIX = "pyy-cache";
+
+    @Autowired
+    private RedisUtil redisUtil;
+
+    private byte[] getKey(K k) {
+        if(k instanceof String) {
+            return (CACHE_PREFIX + k).getBytes();
+        }
+        return SerializationUtils.serialize(k);
+    }
+
+    @Override
+    public V get(K k) throws CacheException {
+        // 这里扩展可以加入echache二级缓存机制
+        System.out.println("从redis中获取用户角色数据");
+        byte[] value = redisUtil.get(getKey(k));
+        if(value != null) {
+            return (V) SerializationUtils.deserialize(value);
+        }
+        return null;
+    }
+
+    @Override
+    public V put(K k, V v) throws CacheException {
+        System.out.println("将获取用户角色数据存入到redis中");
+        byte[] key = getKey(k);
+        byte[] value = SerializationUtils.serialize(v);
+
+        redisUtil.set(key, value);
+        redisUtil.expire(key, 600);
+        return v;
+    }
+
+    @Override
+    public V remove(K k) throws CacheException {
+        byte[] key = getKey(k);
+        byte[] value = redisUtil.get(key);
+        redisUtil.del(key);
+        if(value != null) {
+            return (V) SerializationUtils.deserialize(value);
+        }
+        return null;
+    }
+
+    @Override
+    public void clear() throws CacheException {
+
+    }
+
+    @Override
+    public int size() {
+        return 0;
+    }
+
+    @Override
+    public Set<K> keys() {
+        return null;
+    }
+
+    @Override
+    public Collection<V> values() {
+        return null;
+    }
+}
+```
+2. 编写CacheManager类
+```
+package com.pyy.shiro.cache;
+
+import org.apache.shiro.cache.Cache;
+import org.apache.shiro.cache.CacheException;
+import org.apache.shiro.cache.CacheManager;
+import org.springframework.beans.factory.annotation.Autowired;
+
+/**
+ * Created by Administrator on 2018/7/2 0002.
+ */
+public class RedisCacheManager implements CacheManager {
+
+    @Autowired
+    private RedisCache redisCache;
+
+    @Override
+    public <K, V> Cache<K, V> getCache(String s) throws CacheException {
+        return redisCache;
+    }
+}
+```
+3. 配置CacheManager
+```
+    @Bean
+    public org.apache.shiro.mgt.SecurityManager securityManager() {
+        DefaultWebSecurityManager securityManager = new DefaultWebSecurityManager();
+
+        CustomRealm customRealm = customRealm();
+        // 2.加密配置
+        HashedCredentialsMatcher matcher = new HashedCredentialsMatcher();
+        matcher.setHashAlgorithmName("md5");//设置加密算法名称
+        matcher.setHashIterations(1);//设置加密次数
+        customRealm.setCredentialsMatcher(matcher);
+
+        // 设置Realm
+        securityManager.setRealm(customRealm);
+        // 设置sessionManager
+        securityManager.setSessionManager(sessionManager());
+        // 设置CacheManager
+        securityManager.setCacheManager(redisCacheManager());
+        return securityManager;
+    }
+
+```
+此时系统如果是第一次进入，会先从数据库查询，会将查询结果存入到redis中，下次就会从redis缓存中获取。
 
 
 
